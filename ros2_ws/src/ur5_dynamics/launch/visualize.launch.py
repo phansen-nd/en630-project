@@ -37,36 +37,18 @@ from launch_ros.parameter_descriptions import ParameterValue
 
 
 def generate_launch_description():
-    declared_arguments = []
-    # UR specific arguments
-    declared_arguments.append(
-        DeclareLaunchArgument(
-            "description_file",
-            default_value=PathJoinSubstitution(
-                [FindPackageShare("ur_description"), "urdf", "ur.urdf.xacro"]
-            ),
-            description="URDF/XACRO description file (absolute path) with the robot.",
-        )
+    ur5_with_tool_description_file = PathJoinSubstitution(
+        [FindPackageShare("ur5_dynamics"), "urdf", "ur5_with_tool.urdf.xacro"]
     )
-    declared_arguments.append(
-        DeclareLaunchArgument(
-            "rviz_config_file",
-            default_value=PathJoinSubstitution(
-                [FindPackageShare("ur_description"), "rviz", "view_robot.rviz"]
-            ),
-            description="RViz config file (absolute path) to use when launching rviz.",
-        )
+    rviz_file = PathJoinSubstitution(
+        [FindPackageShare("ur_description"), "rviz", "view_robot.rviz"]
     )
-
-    # Initialize Arguments
-    description_file = LaunchConfiguration("description_file")
-    rviz_config_file = LaunchConfiguration("rviz_config_file")
 
     robot_description_content = Command(
         [
             PathJoinSubstitution([FindExecutable(name="xacro")]),
             " ",
-            description_file,
+            ur5_with_tool_description_file,
             " ",
             "safety_limits:=true ",
             "safety_pos_margin:=0.15 ",
@@ -90,12 +72,10 @@ def generate_launch_description():
         executable="rviz2",
         name="rviz2",
         output="log",
-        arguments=["-d", rviz_config_file],
+        arguments=["-d", rviz_file],
     )
 
-    nodes_to_start = [
+    return LaunchDescription([
         robot_state_publisher_node,
         rviz_node,
-    ]
-
-    return LaunchDescription(declared_arguments + nodes_to_start)
+    ])
