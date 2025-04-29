@@ -67,6 +67,13 @@ def generate_launch_description():
         output="both",
         parameters=[robot_description],
     )
+
+    sim_node = Node(
+        package="ur5_dynamics",
+        executable="sim",
+        output="log",
+    )
+
     rviz_node = Node(
         package="rviz2",
         executable="rviz2",
@@ -77,5 +84,6 @@ def generate_launch_description():
 
     return LaunchDescription([
         robot_state_publisher_node,
+        sim_node,
         rviz_node,
     ])
