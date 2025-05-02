@@ -39,13 +39,29 @@ class DynamicsSimulator(Node):
             self.publish_position()
             return
 
-        current_position, _, _ = self.model.forward_kinematics(self.q)
+        # Parse goal pose
+        goal_position = np.array([self.goal_pose.pose.position.x, self.goal_pose.pose.position.y, self.goal_pose.pose.position.z])
+        goal_rotation = np.array([self.goal_pose.pose.orientation.x, self.goal_pose.pose.orientation.y, self.goal_pose.pose.orientation.z, self.goal_pose.pose.orientation.w])
+        current_position, current_rotation, _ = self.model.forward_kinematics(self.q)
 
-        # todo: replace with PD controller that takes in desired joint angles
-        desired_q_dot = np.array([0.5, 0.0, 0.0, 0.0, 1.0, 1.0])
+        self.get_logger().info(f'Current position: {current_position}')
+        self.get_logger().info(f'Target position: {goal_position}')
 
-        self.q_dot = desired_q_dot  # will add acceleration once we have dynamic model
-        self.q += self.q_dot * self.dt
+        e_p = goal_position - current_position
+        e_R = self.model.orientation_error(current_rotation, goal_rotation)
+        e = np.concatenate([e_p, e_R])
+
+        Kp = np.diag([50.0]*3 + [10.0]*3)  # positional and rotational gains
+        Kd = np.diag([10.0]*3 + [2.0]*3)   # damping gains
+
+        # Optional: you can compute end-effector velocity using J * q_dot
+        v_ee = self.model.jacobian(self.q) @ self.q_dot  # (6,)
+        F_task = Kp @ e - Kd @ v_ee
+
+        J = self.model.jacobian(self.q)
+        tau = J.T @ F_task
+
+        self.q, self.q_dot = self.model.dynamics_step(self.q, self.q_dot, tau, self.dt)
 
         self.publish_position()
 
