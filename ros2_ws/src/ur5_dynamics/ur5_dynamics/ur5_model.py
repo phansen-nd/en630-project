@@ -12,73 +12,6 @@ class UR5Model:
             [0,     0.0823,    0,       0       ]
         ]
 
-        self.link_masses = [3.7, 8.393, 2.33, 1.219, 1.219, 0.1879]
-        self.link_com_positions = [
-            np.array([0.0, -0.02561, 0.00193]),
-            np.array([0.2125, 0.0, 0.11336]),
-            np.array([0.15, 0.0, 0.0265]),
-            np.array([0.0, -0.0018, 0.01634]),
-            np.array([0.0, 0.0018, 0.01634]),
-            np.array([0.0, 0.0, -0.001159])
-        ]
-        self.gravity = np.array([0.0, 0.0, -9.81])
-
-    def mass_matrix(self, q):
-        # TODO: incorporate q for more accurate matrix
-        return np.diag(self.link_masses)
-
-    def gravity_torques(self, q):
-        """
-        Compute gravity torques G(q) by summing over each link's COM torque contribution.
-        """
-        assert len(q) == 6
-
-        G = np.zeros(6)
-        T = np.eye(4)
-
-        for i in range(6):
-            # Forward kinematics to link i
-            theta = q[i] + self.dh_params[i][0]
-            d     = self.dh_params[i][1]
-            a     = self.dh_params[i][2]
-            alpha = self.dh_params[i][3]
-            A_i = self.dh_transform(theta, d, a, alpha)
-            T = T @ A_i
-
-            # COM position in world frame
-            com_local = np.append(self.link_com_positions[i], 1)  # homogeneous
-            com_world = T @ com_local
-            p_com = com_world[0:3]
-
-            # Now compute torque contribution from this link
-            # Do partial FK again to get z_j and o_j for j <= i
-            T_partial = np.eye(4)
-            for j in range(i+1):
-                theta_j = q[j] + self.dh_params[j][0]
-                d_j     = self.dh_params[j][1]
-                a_j     = self.dh_params[j][2]
-                alpha_j = self.dh_params[j][3]
-                A_j = self.dh_transform(theta_j, d_j, a_j, alpha_j)
-                z = T_partial[0:3, 2]
-                o = T_partial[0:3, 3]
-                r = p_com - o
-                G[j] += -self.link_masses[i] * self.gravity @ np.cross(z, r)
-                T_partial = T_partial @ A_j
-
-        return G
-
-    def dynamics_step(self, q, q_dot, tau, dt):
-        M = self.mass_matrix(q)
-        G = self.gravity_torques(q)
-        C = np.zeros((6, 6))  # placeholder
-
-        q_ddot = np.linalg.solve(M, tau - C @ q_dot - G)
-
-        q_dot_new = q_dot + q_ddot * dt
-        q_new = q + q_dot_new * dt
-        return q_new, q_dot_new
-
-
     def dh_transform(self, theta, d, a, alpha):
         return np.array([
             [np.cos(theta), -np.sin(theta)*np.cos(alpha),  np.sin(theta)*np.sin(alpha), a*np.cos(theta)],
@@ -129,19 +62,42 @@ class UR5Model:
 
         return J
 
-    # Compute rotation error as a 3D vector using quaternion error
     def orientation_error(self, R_current, q_goal):
-        # Convert rotation matrix to quaternion
         r_current = R.from_matrix(R_current)
-        q_current = r_current.as_quat()  # [x, y, z, w]
-
-        # Normalize input quaternion (goal)
+        q_current = r_current.as_quat()
         q_goal = q_goal / np.linalg.norm(q_goal)
         r_goal = R.from_quat(q_goal)
-
-        # Relative rotation: q_err = q_goal * q_current^-1
         r_err = r_goal * r_current.inv()
-        angle_axis = r_err.as_rotvec()  # rotation vector
+        return r_err.as_rotvec()
 
-        return angle_axis  # Δθ: axis * angle
+    def inverse_kinematics(self, q_init, goal_position, goal_orientation, max_iters=100, tol=1e-4, alpha=0.5):
+        """
+        Position-only inverse kinematics using iterative Jacobian pseudoinverse.
 
+        Args:
+            q_init: Initial guess for joint angles (6,)
+            goal_position: Desired EE position (3,)
+            max_iters: Max iterations
+            tol: Position error tolerance
+            alpha: Step size
+
+        Returns:
+            q: Joint angles (6,) that reach the goal position
+        """
+        q = q_init.copy()
+
+        for i in range(max_iters):
+            current_position, current_rotation, _ = self.forward_kinematics(q)
+
+            e_p = goal_position - current_position
+            e_o = self.orientation_error(current_rotation, goal_orientation)
+            error = np.concatenate([e_p, e_o])
+
+            if np.linalg.norm(error) < tol:
+                break
+
+            J = self.jacobian(q)  # 6x6 Jacobian
+            delta_q = alpha * np.linalg.pinv(J) @ error
+            q += delta_q
+
+        return q

@@ -3,18 +3,31 @@ from rclpy.node import Node
 from sensor_msgs.msg import JointState
 from geometry_msgs.msg import PoseStamped
 from ur5_dynamics.ur5_model import UR5Model
+from scipy.spatial.transform import Rotation as R
 
 import numpy as np
 
+scripted_poses = [
+    ([0.0, 0.3, 0.4], R.from_euler('xyz', [0, 0, 0]).as_quat()),
+    ([0.4, 0.3, 0.0], R.from_euler('xyz', [0, np.pi/2, 0]).as_quat()),
+    ([0.5, 0.0, 0.4], R.from_euler('xyz', [np.pi/2, np.pi, 0]).as_quat()),
+    ([0.5, 0.3, 0.0], R.from_euler('xyz', [np.pi/2, 0, 0]).as_quat()),
+    ([0.6, 0.0, 0.4], R.from_euler('xyz', [np.pi, 0, 0]).as_quat()),
+    ([0.6, 0.3, 0.0], R.from_euler('xyz', [np.pi, np.pi/2, 0]).as_quat()),
+]
+
 class DynamicsSimulator(Node):
-    def __init__(self):
+    def __init__(self, scripted_poses=scripted_poses):
         super().__init__('sim')
         self.get_logger().info("Started sim node...")
 
         self.joint_pub = self.create_publisher(JointState, '/joint_states', 10)
         self.pose_sub = self.create_subscription(PoseStamped, '/goal_pose', self.pose_callback, 10)
 
-        self.goal_pose = None
+        self.scripted_poses = scripted_poses
+        self.current_pose_index = 0
+        self.goal_pose = self.make_pose_msg(*self.scripted_poses[0])
+
         self.model = UR5Model()
 
         # From official UR5 urdf
@@ -39,31 +52,29 @@ class DynamicsSimulator(Node):
             self.publish_position()
             return
 
-        # Parse goal pose
+        current_position, current_rotation, _ = self.model.forward_kinematics(self.q)
         goal_position = np.array([self.goal_pose.pose.position.x, self.goal_pose.pose.position.y, self.goal_pose.pose.position.z])
         goal_rotation = np.array([self.goal_pose.pose.orientation.x, self.goal_pose.pose.orientation.y, self.goal_pose.pose.orientation.z, self.goal_pose.pose.orientation.w])
-        current_position, current_rotation, _ = self.model.forward_kinematics(self.q)
+        
+        q_solution = self.model.inverse_kinematics(self.q, goal_position, goal_rotation)
 
-        self.get_logger().info(f'Current position: {current_position}')
-        self.get_logger().info(f'Target position: {goal_position}')
-
-        e_p = goal_position - current_position
-        e_R = self.model.orientation_error(current_rotation, goal_rotation)
-        e = np.concatenate([e_p, e_R])
-
-        Kp = np.diag([50.0]*3 + [10.0]*3)  # positional and rotational gains
-        Kd = np.diag([10.0]*3 + [2.0]*3)   # damping gains
-
-        # Optional: you can compute end-effector velocity using J * q_dot
-        v_ee = self.model.jacobian(self.q) @ self.q_dot  # (6,)
-        F_task = Kp @ e - Kd @ v_ee
-
-        J = self.model.jacobian(self.q)
-        tau = J.T @ F_task
-
-        self.q, self.q_dot = self.model.dynamics_step(self.q, self.q_dot, tau, self.dt)
+        alpha = 0.1
+        self.q = self.q + alpha * (q_solution - self.q)
 
         self.publish_position()
+
+        pos_err = np.linalg.norm(goal_position - current_position)
+        rot_err = np.linalg.norm(self.model.orientation_error(current_rotation, goal_rotation))
+
+        # If close enough, advance to the next pose in the script
+        if pos_err < 0.002 and rot_err < 0.1:
+            self.current_pose_index += 1
+            if self.current_pose_index < len(self.scripted_poses):
+                next_pos, next_ori = self.scripted_poses[self.current_pose_index]
+                self.goal_pose = self.make_pose_msg(next_pos, next_ori)
+                self.get_logger().info(f"Moving to scripted pose {self.current_pose_index + 1}")
+            else:
+                self.get_logger().info("Completed all scripted poses.")
 
     def publish_position(self):
         msg = JointState()
@@ -75,6 +86,13 @@ class DynamicsSimulator(Node):
     def pose_callback(self, msg):
         self.get_logger().info('Received goal pose')
         self.goal_pose = msg
+
+    def make_pose_msg(self, position, orientation):
+        pose = PoseStamped()
+        pose.pose.position.x, pose.pose.position.y, pose.pose.position.z = position
+        pose.pose.orientation.x, pose.pose.orientation.y, pose.pose.orientation.z, pose.pose.orientation.w = orientation
+        return pose
+
 
 def main(args=None):
     rclpy.init(args=args)
