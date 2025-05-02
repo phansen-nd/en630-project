@@ -1,11 +1,10 @@
 import rclpy
+import numpy as np
 from rclpy.node import Node
 from sensor_msgs.msg import JointState
 from geometry_msgs.msg import PoseStamped
 from ur5_dynamics.ur5_model import UR5Model
 from scipy.spatial.transform import Rotation as R
-
-import numpy as np
 
 scripted_poses = [
     ([0.0, 0.3, 0.4], R.from_euler('xyz', [0, 0, 0]).as_quat()),
@@ -21,13 +20,21 @@ class DynamicsSimulator(Node):
         super().__init__('sim')
         self.get_logger().info("Started sim node...")
 
+        # Simulation params
+        self.dt = 0.05            # 50ms timestep (20Hz)
+        self.q = np.zeros(6)      # Joint angles (rad)
+
+        # Pubs/subs/timers
         self.joint_pub = self.create_publisher(JointState, '/joint_states', 10)
         self.pose_sub = self.create_subscription(PoseStamped, '/goal_pose', self.pose_callback, 10)
+        self.timer = self.create_timer(self.dt, self.simulation_step)
 
+        # ROS params
         self.scripted_poses = scripted_poses
         self.current_pose_index = 0
         self.goal_pose = self.make_pose_msg(*self.scripted_poses[0])
 
+        # Helper
         self.model = UR5Model()
 
         # From official UR5 urdf
@@ -40,38 +47,33 @@ class DynamicsSimulator(Node):
             'wrist_3_joint'
         ]
 
-        # Simulation params
-        self.dt = 0.05  # 50ms timestep (20Hz)
-        self.q = np.zeros(6)      # Joint angles (rad)
-        self.q_dot = np.zeros(6)  # Joint velocities (rad/s)
-
-        self.timer = self.create_timer(self.dt, self.simulation_step)
-
     def simulation_step(self):
         if self.goal_pose is None:
             self.publish_position()
             return
 
-        current_position, current_rotation, _ = self.model.forward_kinematics(self.q)
+        # Compare current (achieved from FK) and goal position/rotation
+        current_position, current_rotation = self.model.forward_kinematics(self.q)
         goal_position = np.array([self.goal_pose.pose.position.x, self.goal_pose.pose.position.y, self.goal_pose.pose.position.z])
         goal_rotation = np.array([self.goal_pose.pose.orientation.x, self.goal_pose.pose.orientation.y, self.goal_pose.pose.orientation.z, self.goal_pose.pose.orientation.w])
         
         q_solution = self.model.inverse_kinematics(self.q, goal_position, goal_rotation)
 
+        # Update joint positions from IK solution
         alpha = 0.1
         self.q = self.q + alpha * (q_solution - self.q)
 
+        # Publish
         self.publish_position()
 
+        # Determine when to move to next scripted pose
         pos_err = np.linalg.norm(goal_position - current_position)
         rot_err = np.linalg.norm(self.model.orientation_error(current_rotation, goal_rotation))
-
-        # If close enough, advance to the next pose in the script
         if pos_err < 0.002 and rot_err < 0.1:
             self.current_pose_index += 1
             if self.current_pose_index < len(self.scripted_poses):
-                next_pos, next_ori = self.scripted_poses[self.current_pose_index]
-                self.goal_pose = self.make_pose_msg(next_pos, next_ori)
+                next_position, next_orientation = self.scripted_poses[self.current_pose_index]
+                self.goal_pose = self.make_pose_msg(next_position, next_orientation)
                 self.get_logger().info(f"Moving to scripted pose {self.current_pose_index + 1}")
             else:
                 self.get_logger().info("Completed all scripted poses.")

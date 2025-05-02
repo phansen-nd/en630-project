@@ -3,6 +3,7 @@ from scipy.spatial.transform import Rotation as R
 
 class UR5Model:
     def __init__(self):
+        # From UR official website
         self.dh_params = [
             [0,     0.089159,  0,       np.pi/2 ],
             [0,     0,         0.425,   0       ],
@@ -30,12 +31,12 @@ class UR5Model:
             T = T @ self.dh_transform(theta, d, a, alpha)
         position = T[0:3, 3]
         rotation = T[0:3, 0:3]
-        return position, rotation, T
+        return position, rotation
 
     def jacobian(self, q):
         T = np.eye(4)
-        origins = [T[0:3, 3]]     # o_0
-        z_axes = [T[0:3, 2]]      # z_0
+        origins = [T[0:3, 3]] # o_0
+        z_axes = [T[0:3, 2]] # z_0
 
         # Forward kinematics to collect all o_i and z_i
         for i in range(6):
@@ -46,12 +47,13 @@ class UR5Model:
             A_i = self.dh_transform(theta, d, a, alpha)
             T = T @ A_i
 
-            origins.append(T[0:3, 3])     # o_i
-            z_axes.append(T[0:3, 2])      # z_i
+            origins.append(T[0:3, 3]) # o_i
+            z_axes.append(T[0:3, 2]) # z_i
 
         o_n = origins[-1]
         J = np.zeros((6, 6))
 
+        # Compute each link's current linear/angular Jacobian
         for i in range(6):
             z = z_axes[i]
             o_i = origins[i]
@@ -62,6 +64,7 @@ class UR5Model:
 
         return J
 
+    # Contain the logic for comparing rot matrix w/ quaternion
     def orientation_error(self, R_current, q_goal):
         r_current = R.from_matrix(R_current)
         q_current = r_current.as_quat()
@@ -70,34 +73,20 @@ class UR5Model:
         r_err = r_goal * r_current.inv()
         return r_err.as_rotvec()
 
-    def inverse_kinematics(self, q_init, goal_position, goal_orientation, max_iters=100, tol=1e-4, alpha=0.5):
-        """
-        Position-only inverse kinematics using iterative Jacobian pseudoinverse.
-
-        Args:
-            q_init: Initial guess for joint angles (6,)
-            goal_position: Desired EE position (3,)
-            max_iters: Max iterations
-            tol: Position error tolerance
-            alpha: Step size
-
-        Returns:
-            q: Joint angles (6,) that reach the goal position
-        """
+    # Jacobian-based IK
+    def inverse_kinematics(self, q_init, goal_position, goal_orientation):
         q = q_init.copy()
 
-        for i in range(max_iters):
-            current_position, current_rotation, _ = self.forward_kinematics(q)
+        for i in range(100):
+            current_position, current_rotation = self.forward_kinematics(q)
 
             e_p = goal_position - current_position
             e_o = self.orientation_error(current_rotation, goal_orientation)
             error = np.concatenate([e_p, e_o])
 
-            if np.linalg.norm(error) < tol:
+            if np.linalg.norm(error) < 1e-4:
                 break
 
-            J = self.jacobian(q)  # 6x6 Jacobian
-            delta_q = alpha * np.linalg.pinv(J) @ error
-            q += delta_q
+            q += 0.1 * np.linalg.pinv(self.jacobian(q)) @ error
 
         return q
